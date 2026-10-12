@@ -1,0 +1,5 @@
+__pycache__/
+*.log
+.DS_Store
+# local test files, never commit
+drop-test-*.bin
