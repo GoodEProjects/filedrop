@@ -1,0 +1,123 @@
+================================================================================
+SETUP-PC-WORKER.txt -- plain worker PC (opencode + file transfer, NO phone site)
+================================================================================
+GOAL: this PC runs opencode invisibly in the background so the controller PC
+can drive it (build things, send files), plus filedrop for moving files.
+No windows, no icons, no popups. Nothing to close. Stays awake with the
+screen off. This PC gets NO phone website.
+
+YOU NEED: physical access to this PC, its Windows login, an admin account
+(right-click PowerShell -> Run as administrator for Section 3 only).
+
+Time: ~15 minutes. Do the sections in order.
+--------------------------------------------------------------------------------
+SECTION 1 -- install the pieces (normal PowerShell, no admin needed)
+--------------------------------------------------------------------------------
+1. Install opencode:  https://opencode.ai/docs  (follow it, then close and
+   reopen PowerShell so `opencode` is on PATH). Verify:
+     opencode --version
+2. Install croc (file transport):
+     winget install schollz.croc -e --accept-source-agreements --accept-package-agreements
+3. Install Tailscale (so the controller reaches this PC from anywhere):
+   https://tailscale.com/download  -- install, open it from Start, LOG IN
+   with the SAME Tailscale account as the other PCs. Then note this PC's
+   tailnet name (Tailscale tray -> it shows like DESKTOP-ABC123).
+   If Windows Firewall asks, allow on PRIVATE networks.
+4. Install Python 3 (for drop.py / remote.py helpers):
+   https://www.python.org/downloads  (tick "Add python.exe to PATH").
+5. Get this repo on this PC (pick ONE):
+     git clone https://github.com/GoodEProjects/filedrop
+   or: open that page in a browser -> Code -> Download ZIP -> unzip it.
+   Remember the folder path, e.g. C:\Users\<you>\Documents\filedrop
+
+--------------------------------------------------------------------------------
+SECTION 2 -- opencode login (whose models it spends)
+--------------------------------------------------------------------------------
+This worker spends whoever logs in here. For YOUR jobs on YOUR PCs, log in
+with YOUR opencode account (one time, interactive):
+
+  opencode auth login
+
+Follow the browser prompt. (Alternative: a separate account if you want
+separate billing/quota -- your call, same command.)
+
+--------------------------------------------------------------------------------
+SECTION 3 -- keep the PC awake with screen off (ADMIN PowerShell)
+--------------------------------------------------------------------------------
+Screen off is FINE and changes nothing -- programs and network keep running.
+What must NOT happen is SYSTEM sleep / hibernate / lid-sleep. Run these
+once as administrator (right-click PowerShell -> Run as administrator).
+On a desktop, lid lines don't apply but are harmless.
+
+  powercfg /change standby-timeout-ac 0
+  powercfg /change standby-timeout-dc 0
+  powercfg /hibernate off
+  powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+  powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+  powercfg /setactive SCHEME_CURRENT
+
+Meaning: never sleep on charger (0 = never), no hibernate file, closing
+the lid does nothing (0 = do nothing), on charger AND battery. Display
+sleep is separate and untouched -- screen may go dark freely.
+Keep the PC on CHARGER power whenever it should stay reachable.
+
+--------------------------------------------------------------------------------
+SECTION 4 -- invisible opencode worker (normal PowerShell)
+--------------------------------------------------------------------------------
+1. Open start-serve.cmd (in the repo folder) in Notepad. Set a STRONG unique
+   password on the OPENCODE_SERVER_PASSWORD line (this PC's OWN password --
+   do NOT reuse another PC's). Save.
+2. Lock the file to your Windows user only (it holds the password):
+     icacls "C:\path\to\filedrop\start-serve.cmd" /inheritance:r /grant:r "%USERNAME%:F"
+3. Create the hidden task (replace USER with the Windows username that will
+   stay on this PC, and fix the repo path). It will ask for that user's
+   Windows password once -- that is how it runs with no one logged on:
+
+     schtasks /create /tn "opencode serve" ^
+       /tr "cmd /c \"C:\path\to\filedrop\start-serve.cmd\"" ^
+       /sc onstart /ru USER /rp /rl highest /f
+
+   (Type the lines WITHOUT the ^ if pasting as one line. /rp with nothing
+   after it prompts securely. Answer the password prompt.)
+   Flags mean: at every startup, as that user, hidden window, highest
+   privileges. No console window EVER appears. It survives logoff. A
+   4-year-old cannot see or close it (Task Manager would list opencode.exe
+   under Details -- nothing is admin-proof, this is kid-proof).
+4. Start it now without rebooting:
+     schtasks /run /tn "opencode serve"
+   Wait 15 seconds, then verify it listens (no auth needed for health):
+     curl http://127.0.0.1:4096/api/health
+   Expect a small JSON answer, not an error.
+5. Watchdog (restarts serve if it ever dies; every 5 min, hidden):
+   Reuse the controller's watch script if present, or skip -- opencode
+   serve itself is stable; the scheduled task already relaunches it on
+   every boot. Recommended but optional.
+
+--------------------------------------------------------------------------------
+SECTION 5 -- hand back to the controller (this PC is done)
+--------------------------------------------------------------------------------
+Send the controller operator THESE THREE THINGS (any chat):
+  1. Tailnet name of this PC (from the Tailscale tray icon).
+  2. The OPENCODE_SERVER_PASSWORD you set in start-serve.cmd.
+  3. The Windows username this PC runs under (for reference).
+They register it with:  python remote.py add --name <pick> --url http://<tailnet>:4096
+Then they verify with:  python remote.py health --server <pick>
+
+--------------------------------------------------------------------------------
+TROUBLESHOOTING
+--------------------------------------------------------------------------------
+- schtasks asks for a password and fails: you typed the wrong Windows
+  password, or the user has no password (set one first).
+- curl health fails: task didn't start. Check
+    schtasks /query /tn "opencode serve" /v /fo list   (look at Last Result)
+  and the log:  filedrop\serve.log  (last lines say why).
+- Controller can't reach it: Tailscale not logged in on this PC, or the
+  tailnet name is wrong. Open Tailscale, confirm "Connected".
+- Port taken (4096 busy): something else serves here. Change --port in
+  start-serve.cmd AND tell the controller the new port.
+- PC slept anyway: Section 3 was skipped or run without admin. Redo it
+  in an ADMINISTRATOR PowerShell and confirm each command printed nothing
+  (silence = success).
+- Uninstall: schtasks /delete /tn "opencode serve" /f, delete the repo
+  folder, winget uninstall the apps. Nothing else was touched.
+================================================================================

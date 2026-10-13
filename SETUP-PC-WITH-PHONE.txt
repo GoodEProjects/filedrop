@@ -1,0 +1,165 @@
+================================================================================
+SETUP-PC-WITH-PHONE.txt -- PC with its OWN isolated phone site
+================================================================================
+GOAL: this PC runs (a) an invisible opencode worker, (b) filedrop, and
+(c) its OWN phone website for THIS PC ONLY. Someone else uses that site
+from a phone. It can NEVER see or touch any other PC's stuff.
+
++------------------+   +------------------+   +------------------+
+| YOUR pc          |   | THIS pc (cousin) |   | WORKER pc        |
+| your site        |   | ITS OWN site     |   | no site          |
+| your password    |   | DIFFERENT passwd |   | controller drives|
+| your projects    |   | only ITS projects|   | it, no phone     |
++------------------+   +------------------+   +------------------+
+Different passwords, different addresses, different data. The only shared
+thing is YOUR Cloudflare account for the address (or use a separate
+account for maximum separation -- your call, steps marked *).
+
+YOU NEED: physical access to this PC, its Windows login, an admin account
+for Sections 3 and 6, and the Cloudflare account that owns a domain
+(e.g. you.example.com -- the guide uses pc2.example.com, change it).
+
+Time: ~30 minutes. Do the sections in order.
+--------------------------------------------------------------------------------
+SECTION 1 -- base pieces (normal PowerShell, no admin needed)
+--------------------------------------------------------------------------------
+Same as a worker PC:
+1. opencode:  https://opencode.ai/docs   then verify:  opencode --version
+2. croc:  winget install schollz.croc -e --accept-source-agreements --accept-package-agreements
+3. Tailscale: https://tailscale.com/download -- install, LOG IN with the
+   same account as the other PCs (lets the controller reach opencode here
+   directly too). Note the tailnet name.
+4. Python 3: https://www.python.org/downloads (tick "Add python.exe to PATH").
+5. This repo (filedrop) -- clone or ZIP, remember the path:
+     git clone https://github.com/GoodEProjects/filedrop
+6. The phone stack repo -- clone or ZIP next to it:
+     git clone https://github.com/GoodEProjects/opencode-phone
+   (Its README covers the stack; below is the exact wiring for THIS pc.)
+
+--------------------------------------------------------------------------------
+SECTION 2 -- opencode login (whose models it spends)
+--------------------------------------------------------------------------------
+  opencode auth login
+Log in with the account whose quota this PC should spend (usually YOURS --
+the work it does is yours). One time, interactive, done.
+
+--------------------------------------------------------------------------------
+SECTION 3 -- keep the PC awake with screen off (ADMIN PowerShell)
+--------------------------------------------------------------------------------
+Screen off changes NOTHING -- programs and network keep running. Only
+SYSTEM sleep / hibernate / lid-sleep would stop this PC. Run once as
+administrator:
+
+  powercfg /change standby-timeout-ac 0
+  powercfg /change standby-timeout-dc 0
+  powercfg /hibernate off
+  powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+  powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+  powercfg /setactive SCHEME_CURRENT
+
+Keep it on CHARGER power whenever it should stay reachable. Display sleep
+stays on -- screen may go dark freely, even with the lid closed.
+
+--------------------------------------------------------------------------------
+SECTION 4 -- invisible opencode worker (normal PowerShell)
+--------------------------------------------------------------------------------
+1. In the filedrop folder, open start-serve.cmd in Notepad. Set a STRONG
+   password UNIQUE TO THIS PC on the OPENCODE_SERVER_PASSWORD line.
+   (This password is for the CONTROLLER to drive this PC. It is NOT the
+   phone-site password -- that comes in Section 6.)
+2. Lock it:  icacls "C:\path\to\filedrop\start-serve.cmd" /inheritance:r /grant:r "%USERNAME%:F"
+3. Hidden task (replace USER + path; /rp prompts for the Windows password):
+
+     schtasks /create /tn "opencode serve" ^
+       /tr "cmd /c \"C:\path\to\filedrop\start-serve.cmd\"" ^
+       /sc onstart /ru USER /rp /rl highest /f
+
+   No window ever. Survives logoff and reboot. Kid-proof (only Task
+   Manager Details would list opencode.exe -- nothing is admin-proof).
+4. Start now:  schtasks /run /tn "opencode serve"
+   Verify (15s later):  curl http://127.0.0.1:4096/api/health
+5. Send the CONTROLLER these three things: tailnet name of this PC, the
+   password from step 1, the Windows username. They run:
+     python remote.py add --name <pick> --url http://<tailnet>:4096
+
+--------------------------------------------------------------------------------
+SECTION 5 -- the phone stack for THIS pc (normal PowerShell)
+--------------------------------------------------------------------------------
+This is the opencode-phone repo, installed with THIS PC's OWN login --
+DIFFERENT from every other password. It serves THIS PC's projects only.
+
+1. cd into the opencode-phone folder and run its installer:
+     powershell -ExecutionPolicy Bypass -File .\install.ps1
+   - Username/password: invent FRESH ones for the phone site user.
+     (Not the Section-4 password. Not your password. Unique to this site.)
+   - Say NO to Tailscale (already installed) unless you want it reinstalled.
+   - Say YES to auto-start on logon. Say YES to the watchdog.
+2. Do NOT run start-phone.ps1 -Lan here (that would expose it to the local
+   network). The site goes out through the tunnel in Section 6 instead.
+   The installer already proved the stack starts; leave it stopped for now
+   (or leave it -- the tunnel below is what publishes it).
+
+--------------------------------------------------------------------------------
+SECTION 6 -- its OWN public address via Cloudflare Tunnel (ADMIN shell once)
+--------------------------------------------------------------------------------
+This gives the site an address like https://pc2.example.com that belongs
+to THIS PC alone. Anyone opening it only ever reaches THIS PC's opencode
+-- your other PCs are not on this path at all.
+
+1. Install cloudflared:
+     winget install Cloudflare.cloudflared -e --accept-source-agreements --accept-package-agreements
+2. Log in to Cloudflare (opens a browser, pick the account holding your
+   domain; *or a separate account for maximum separation):
+     cloudflared tunnel login
+3. Create this PC's tunnel and address (change names to yours):
+     cloudflared tunnel create pccousin
+     cloudflared tunnel route dns pccousin pc2.example.com
+4. Write its config file at C:\ProgramData\cloudflared\config.yml
+   (create the folder first):
+     tunnel: pccousin
+     credentials-file: C:\ProgramData\cloudflared\<TUNNEL-ID>.json
+     ingress:
+       - hostname: pc2.example.com
+         service: http://127.0.0.1:4098
+       - service: http_status:404
+   (The <TUNNEL-ID>.json file appeared in %USERPROFILE%\.cloudflared\
+   after step 3 -- copy it into C:\ProgramData\cloudflared\.
+   Port 4098 = the phone proxy from Section 5. If you changed PHONE_PORT
+   in config.cmd, use that number instead.)
+5. Install it as a Windows SERVICE (invisible, auto-start, survives
+   logoff -- exactly what a kid-proof box needs), ADMIN shell:
+     cloudflared service install
+   Then start it:  sc start cloudflared   (or reboot).
+6. On the phone (any network): open https://pc2.example.com, sign in with
+   the Section-5 phone login ONCE, let the browser save it. First load
+   auto-opens this PC's existing projects (one automatic reload).
+
+ISOLATION CHECKLIST (verify before handing over):
+ [ ] Section-4 password != Section-5 password != any of your passwords.
+ [ ] https://pc2.example.com shows ONLY this PC's projects (it serves
+     this PC's opencode data directory -- physically incapable of seeing
+     another machine's sessions).
+ [ ] The controller drives this PC through Tailscale + remote.py, NOT
+     through this website (separate path, separate login).
+ [ ] Nobody pasted any password into chat, tickets, or notes.
+
+--------------------------------------------------------------------------------
+TROUBLESHOOTING
+--------------------------------------------------------------------------------
+- Site unreachable: cloudflared service stopped?
+    sc query cloudflared   ->   sc start cloudflared
+  DNS not propagated yet (up to ~5 min after route dns)? Wrong port in
+  config.yml (must match PHONE_PORT)? Phone proxy not running (rerun the
+  opencode-phone start step once to confirm it boots)?
+- Phone shows empty projects: first-run seed needs one automatic reload;
+  hard-refresh once if it stays empty (stale cache).
+- "Thinking" forever on send: that session is busy on another frontend --
+  use a fresh session per task, never drive one session from two sides.
+- PC slept anyway: Section 3 skipped or not admin. Redo as administrator.
+- opencode serve down: schtasks /run /tn "opencode serve", read
+  filedrop\serve.log tail. The watchdog task (if installed) heals this
+  within 5 minutes on its own.
+- Uninstall phone site: sc stop cloudflared, sc delete cloudflared,
+  delete the tunnel (cloudflared tunnel delete pccousin), remove the
+  opencode-phone folder + its Startup shortcut + watch task.
+================================================================================
